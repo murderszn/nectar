@@ -1,0 +1,653 @@
+"""
+Honey interactive session — Claude Code / OpenCode terminal feel.
+
+Feel targets:
+  • Scrollback chat (no alt-screen takeover)
+  • Compact tool tree:  ⏺ Tool(detail)  /  ⎿  summary + clipped body
+  • Transient thinking spinner (dim, disappears cleanly)
+  • Quiet assistant markdown (no loud banners)
+  • prompt_toolkit input with soft prompt chrome
+"""
+
+from __future__ import annotations
+
+import time
+from pathlib import Path
+from typing import Any, Optional
+
+from prompt_toolkit import PromptSession
+from prompt_toolkit.formatted_text import HTML
+from prompt_toolkit.history import FileHistory
+from prompt_toolkit.key_binding import KeyBindings
+from prompt_toolkit.keys import Keys
+from prompt_toolkit.styles import Style as PTStyle
+from rich.console import Console, Group
+from rich.live import Live
+from rich.markdown import Markdown
+from rich.padding import Padding
+from rich.spinner import Spinner
+from rich.syntax import Syntax
+from rich.text import Text
+
+from opencode_harness import __version__
+from opencode_harness.agent.loop import AgentLoop
+from opencode_harness.config import DEFAULT_CONFIG_DIR, AppConfig
+from opencode_harness.logging_setup import get_logger, log_path
+from opencode_harness.models import ToolCall
+from opencode_harness.provider.client import OpenAICompatibleClient, ProviderError
+from opencode_harness.tools.registry import ToolRegistry
+from opencode_harness.ui import art
+from opencode_harness.ui.art import (
+    C_CORAL,
+    C_CYAN,
+    C_DIM,
+    C_FOG,
+    C_HONEY,
+    C_INK,
+    C_MINT,
+    C_SOFT,
+    C_TEAL,
+)
+
+log = get_logger("session")
+
+# prompt_toolkit styles — soft honey prompt like Claude's ❯
+PROMPT_STYLE = PTStyle.from_dict(
+    {
+        "prompt": f"bold {C_HONEY}",
+        "rprompt": f"{C_DIM}",
+    }
+)
+
+# How many result lines to show before collapsing (Claude-like density)
+_RESULT_PREVIEW_LINES = 12
+_RESULT_MAX_CHARS = 2400
+
+
+class SessionUI:
+    """Claude/OpenCode-quiet conversation surface."""
+
+    def __init__(self, console: Optional[Console] = None, *, syntax_theme: str = "monokai"):
+        self.console = console or Console(highlight=False)
+        self.syntax_theme = syntax_theme
+        self._live: Optional[Live] = None
+        self._status = "idle"
+        self._t0: Optional[float] = None
+        self._turn_t0: Optional[float] = None
+        self._tools_this_turn = 0
+        self._streaming = False
+
+    # ------------------------------------------------------------------
+    # Chrome
+    # ------------------------------------------------------------------
+
+    def splash(
+        self,
+        *,
+        model: str,
+        base_url: str,
+        workspace: str,
+        auth: str,
+        full: bool = False,
+    ) -> None:
+        art.print_splash(
+            self.console,
+            model=model,
+            base_url=base_url,
+            workspace=workspace,
+            auth=auth,
+            version=__version__,
+            log_file=str(log_path()),
+            full=full,
+        )
+
+    def turn_break(self) -> None:
+        # Quiet breath — no wave spam
+        self.console.print()
+
+    def info(self, msg: str) -> None:
+        self.console.print(Text(f"  {art.ICON_DOT} {msg}", style=C_FOG))
+
+    def warn(self, msg: str) -> None:
+        self.console.print(Text(f"  ⚠ {msg}", style=C_HONEY))
+
+    def error(self, msg: str) -> None:
+        self.console.print(Text(f"  {art.ICON_FAIL} {msg}", style=C_CORAL))
+
+    def system(self, msg: str) -> None:
+        self.console.print(Text(f"  {msg}", style=C_DIM))
+
+    # ------------------------------------------------------------------
+    # Thinking / spinner (transient — vanishes when work finishes)
+    # ------------------------------------------------------------------
+
+    def think_start(self, message: str = "Thinking") -> None:
+        self.think_stop()
+        self._status = message
+        self._t0 = time.monotonic()
+        label = _humanize_status(message)
+        spin = Spinner(
+            "dots",
+            text=Text(f" {label}", style=f"italic {C_DIM}"),
+            style=C_CYAN,
+        )
+        self._live = Live(
+            spin,
+            console=self.console,
+            refresh_per_second=16,
+            transient=True,  # critical: leave no ghost line
+            vertical_overflow="ellipsis",
+        )
+        self._live.start()
+
+    def think_update(self, message: str) -> None:
+        self._status = message
+        if self._live is None:
+            self.think_start(message)
+            return
+        label = _humanize_status(message)
+        elapsed = ""
+        if self._t0 is not None:
+            secs = int(time.monotonic() - self._t0)
+            if secs >= 1:
+                elapsed = f" · {secs}s"
+        spin = Spinner(
+            "dots",
+            text=Text(f" {label}{elapsed}", style=f"italic {C_DIM}"),
+            style=C_CYAN,
+        )
+        self._live.update(spin)
+
+    def think_stop(self) -> None:
+        if self._live is not None:
+            try:
+                self._live.stop()
+            except Exception:  # pragma: no cover
+                pass
+            self._live = None
+        self._t0 = None
+
+    # ------------------------------------------------------------------
+    # Conversation
+    # ------------------------------------------------------------------
+
+    def user_turn_spacer(self) -> None:
+        """Gap after prompt_toolkit echo — never re-print the user text."""
+        self._turn_t0 = time.monotonic()
+        self._tools_this_turn = 0
+        self._streaming = False
+        # single blank line only
+        self.console.print()
+
+    def tool_start(self, tc: ToolCall, args: dict[str, Any]) -> None:
+        self.think_stop()
+        self._tools_this_turn += 1
+        name = tc.function.name
+        pretty = art._pretty_tool_name(name)
+        detail = _tool_detail(name, args)
+
+        self.console.print(art.tool_call_line(pretty, detail))
+
+        # Optional compact extras (edit diffs, write path only — not full body)
+        if name == "edit_file":
+            old = str(args.get("old_string", "")).splitlines()
+            new = str(args.get("new_string", "")).splitlines()
+            old_s = (old[0][:70] + "…") if old else ""
+            new_s = (new[0][:70] + "…") if new else ""
+            if old_s:
+                self.console.print(Text(f"    − {old_s}", style=C_CORAL))
+            if new_s:
+                self.console.print(Text(f"    + {new_s}", style=C_MINT))
+
+        self.think_start(f"Running {pretty}")
+
+    def tool_end(self, tc: ToolCall, result: str) -> None:
+        self.think_stop()
+        name = tc.function.name
+        ok = not result.startswith(("ERROR", "BLOCKED", "TIMEOUT"))
+        summary = _result_summary(name, result, ok=ok)
+        self.console.print(art.tool_result_prefix(ok=ok, summary=summary))
+
+        # Collapsed body — first N lines, dim, tree-indented
+        body_lines = _clip_result_lines(result)
+        style = C_DIM if ok else C_CORAL
+        for line in body_lines:
+            # keep tree alignment under ⎿
+            self.console.print(Text(f"     {line}", style=style))
+
+    def assistant_final(self, text: str) -> None:
+        self.think_stop()
+        if self._streaming:
+            # stream path already printed tokens
+            self.console.print()
+            self._streaming = False
+        else:
+            self.console.print(art.agent_header())
+            md = Markdown(text or "")
+            self.console.print(Padding(md, (0, 0, 0, 2)))
+        self._print_turn_footer()
+
+    def stream_delta(self, chunk: str) -> None:
+        self.think_stop()
+        if not self._streaming:
+            self._streaming = True
+            self.console.print(art.agent_header(), end="")
+            self.console.print("  ", end="")
+        self.console.print(chunk, end="", highlight=False, soft_wrap=True)
+
+    def _print_turn_footer(self) -> None:
+        if self._turn_t0 is None:
+            return
+        elapsed = time.monotonic() - self._turn_t0
+        parts = []
+        if self._tools_this_turn:
+            parts.append(f"{self._tools_this_turn} tool" + ("s" if self._tools_this_turn != 1 else ""))
+        parts.append(f"{elapsed:.1f}s")
+        self.console.print(Text(f"  {art.ICON_DOT} " + " · ".join(parts), style=C_SOFT))
+        self._turn_t0 = None
+
+    def confirm_destructive(self, command: str, reason: str) -> bool:
+        self.think_stop()
+        self.console.print()
+        t = Text()
+        t.append("  ⚠ ", style=f"bold {C_CORAL}")
+        t.append("permission", style=f"bold {C_CORAL}")
+        t.append(f"  {reason}", style=C_HONEY)
+        self.console.print(t)
+        self.console.print(
+            Syntax(
+                command,
+                "bash",
+                theme=self.syntax_theme,
+                word_wrap=True,
+                line_numbers=False,
+                background_color="default",
+            )
+        )
+        try:
+            answer = self.console.input(
+                f"  [{C_CORAL}]allow?[/] [dim]\\[y/N][/] "
+            ).strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            self.console.print()
+            return False
+        return answer in {"y", "yes"}
+
+
+# ---------------------------------------------------------------------------
+# Formatting helpers
+# ---------------------------------------------------------------------------
+
+def _humanize_status(message: str) -> str:
+    m = (message or "").strip().rstrip("…").strip()
+    low = m.lower()
+    if "consult" in low or "model" in low:
+        return f"{art.ICON_THINK} Thinking"
+    if "running" in low:
+        return m if m.startswith(art.ICON_THINK) else f"{art.ICON_THINK} {m}"
+    if not m:
+        return f"{art.ICON_THINK} Working"
+    if not m.startswith(art.ICON_THINK):
+        return f"{art.ICON_THINK} {m[0].upper() + m[1:]}" if m else f"{art.ICON_THINK} Working"
+    return m
+
+
+def _tool_detail(name: str, args: dict[str, Any]) -> str:
+    if name == "execute_bash_command":
+        return str(args.get("command", "")).replace("\n", " ")
+    if name in {"read_file", "view_workspace_file", "write_file", "write_workspace_file", "edit_file", "list_directory"}:
+        path = str(args.get("path", "."))
+        if name == "read_file" and (args.get("offset") or args.get("limit")):
+            return f"{path}:{args.get('offset', 1)}"
+        return path
+    if name == "glob_files":
+        return str(args.get("pattern", ""))
+    if name == "grep_search":
+        return str(args.get("pattern", ""))
+    if name == "browse_web_content":
+        return str(args.get("url", ""))
+    return ""
+
+
+def _result_summary(name: str, result: str, *, ok: bool) -> str:
+    if not ok:
+        head = result.splitlines()[0] if result else "failed"
+        return head[:100]
+    lines = result.splitlines() if result else []
+    n = len(lines)
+    if name == "execute_bash_command":
+        code = "?"
+        for ln in lines[:5]:
+            if ln.startswith("exit_code:"):
+                code = ln.split(":", 1)[-1].strip()
+                break
+        return f"exit {code} · {n} lines"
+    if name in {"read_file", "view_workspace_file"}:
+        return f"read · {n} lines"
+    if name in {"write_file", "write_workspace_file", "edit_file"}:
+        # first line is OK: …
+        first = lines[0] if lines else "done"
+        return first if first.startswith("OK") else f"wrote · {n} lines"
+    if name in {"glob_files", "grep_search", "list_directory"}:
+        return f"{n} lines"
+    if name == "browse_web_content":
+        return f"fetched · {n} lines"
+    return f"done · {n} lines"
+
+
+def _clip_result_lines(result: str) -> list[str]:
+    if not result:
+        return []
+    # Drop noisy headers for bash (keep stdout body denser)
+    lines = result.splitlines()
+    cleaned: list[str] = []
+    skip_prefixes = ("--- stdout ---", "--- stderr ---")
+    for ln in lines:
+        if ln in skip_prefixes:
+            continue
+        if ln == "(empty)":
+            continue
+        cleaned.append(ln)
+
+    # Cap chars then lines
+    text = "\n".join(cleaned)
+    if len(text) > _RESULT_MAX_CHARS:
+        text = text[:_RESULT_MAX_CHARS]
+        cleaned = text.splitlines()
+        cleaned.append("…")
+
+    if len(cleaned) > _RESULT_PREVIEW_LINES:
+        head = cleaned[:_RESULT_PREVIEW_LINES]
+        more = len(cleaned) - _RESULT_PREVIEW_LINES
+        head.append(f"… +{more} lines")
+        return head
+    return cleaned
+
+
+def _guess_lang(path: str) -> str:
+    lower = path.lower()
+    for ext, lang in {
+        ".py": "python",
+        ".js": "javascript",
+        ".ts": "typescript",
+        ".json": "json",
+        ".md": "markdown",
+        ".sh": "bash",
+        ".yaml": "yaml",
+        ".yml": "yaml",
+        ".rs": "rust",
+        ".go": "go",
+    }.items():
+        if lower.endswith(ext):
+            return lang
+    return "text"
+
+
+# ---------------------------------------------------------------------------
+# Slash commands + main loop
+# ---------------------------------------------------------------------------
+
+def _handle_slash(
+    line: str,
+    loop: AgentLoop,
+    ui: SessionUI,
+    config: AppConfig,
+) -> bool:
+    parts = line.strip().split(maxsplit=1)
+    cmd = parts[0].lower()
+    arg = parts[1].strip() if len(parts) > 1 else ""
+
+    if cmd in {"/exit", "/quit", "/q"}:
+        ui.console.print(art.goodbye_art())
+        raise SystemExit(0)
+
+    if cmd == "/help":
+        ui.system("commands")
+        for row in (
+            "/model [name]   pick model (sectioned list if no name)",
+            "/models         same as /model",
+            "/tools          list tools",
+            "/mode build|plan",
+            "/reset          clear conversation",
+            "/config         show settings",
+            "/logs           activity log path",
+            "/workspace [p]  show/set workspace",
+            "/banner         big splash art",
+            "/exit",
+        ):
+            ui.system(f"  {row}")
+        return True
+
+    if cmd == "/banner":
+        ui.splash(
+            model=config.provider.model,
+            base_url=config.provider.base_url,
+            workspace=str(config.workspace),
+            auth="",
+            full=True,
+        )
+        return True
+
+    if cmd == "/mode":
+        if not arg:
+            ui.info(f"mode {getattr(config, 'agent_mode', 'build')}")
+        elif arg.lower() in {"build", "plan"}:
+            config.agent_mode = arg.lower()
+            loop.registry.set_mode(arg.lower())  # type: ignore[arg-type]
+            loop.reset()
+            ui.info(f"mode → {arg.lower()}  (history cleared)")
+        else:
+            ui.warn("mode must be build or plan")
+        return True
+
+    if cmd in {"/model", "/models"}:
+        if arg:
+            loop.set_model(arg)
+            ui.info(f"model → {arg}")
+            return True
+        from opencode_harness.ui.picker import pick_model
+
+        chosen = pick_model(
+            ui.console,
+            current=config.provider.model,
+            configured=list(config.provider.models or []),
+        )
+        if not chosen:
+            ui.system("unchanged")
+            return True
+        if chosen == config.provider.model:
+            ui.info(f"already on {chosen}")
+            return True
+        loop.set_model(chosen)
+        if chosen not in config.provider.models:
+            config.provider.models = list(config.provider.models) + [chosen]
+        ui.info(f"model → {chosen}")
+        return True
+
+    if cmd == "/tools":
+        for name in loop.registry.list_names():
+            ui.system(f"  {art._pretty_tool_name(name):8}  {name}")
+        return True
+
+    if cmd == "/reset":
+        loop.reset()
+        ui.info("conversation cleared")
+        return True
+
+    if cmd == "/config":
+        ui.system(f"endpoint   {config.provider.base_url}")
+        ui.system(f"model      {config.provider.model}")
+        ui.system(f"mode       {getattr(config, 'agent_mode', 'build')}")
+        ui.system(f"workspace  {config.workspace}")
+        ui.system(f"log        {log_path()}")
+        return True
+
+    if cmd in {"/logs", "/log"}:
+        from opencode_harness.logging_setup import recent_activity
+
+        ui.info(f"log → {log_path()}")
+        for row in recent_activity(10):
+            ui.system(row)
+        return True
+
+    if cmd == "/workspace":
+        if not arg:
+            ui.info(f"workspace → {config.workspace}")
+        else:
+            new_ws = Path(arg).expanduser().resolve()
+            if not new_ws.is_dir():
+                ui.error(f"not a directory: {new_ws}")
+            else:
+                config.workspace = new_ws
+                loop.registry.workspace = new_ws
+                loop.reset()
+                ui.info(f"workspace → {new_ws}")
+        return True
+
+    ui.warn(f"unknown {cmd}  ·  /help")
+    return True
+
+
+def create_session_loop(config: AppConfig, ui: SessionUI, api_key: str) -> AgentLoop:
+    client = OpenAICompatibleClient(config.provider, api_key=api_key)
+
+    mode = getattr(config, "agent_mode", "build") or "build"
+    registry = ToolRegistry(
+        workspace=config.workspace,
+        tool_config=config.tools,
+        confirm_destructive=ui.confirm_destructive,
+        mode=mode if mode in ("build", "plan") else "build",  # type: ignore[arg-type]
+    )
+
+    def on_status(msg: str) -> None:
+        ui.think_update(msg)
+
+    def on_tool_start(tc: ToolCall, args: dict[str, Any]) -> None:
+        ui.tool_start(tc, args)
+
+    def on_tool_end(tc: ToolCall, result: str) -> None:
+        ui.tool_end(tc, result)
+
+    def on_assistant_text(text: str) -> None:
+        ui.assistant_final(text)
+
+    def on_stream_delta(chunk: str) -> None:
+        ui.stream_delta(chunk)
+
+    return AgentLoop(
+        config=config,
+        client=client,
+        registry=registry,
+        on_tool_start=on_tool_start,
+        on_tool_end=on_tool_end,
+        on_assistant_text=on_assistant_text,
+        on_status=on_status,
+        on_stream_delta=on_stream_delta,
+    )
+
+
+def _build_key_bindings() -> KeyBindings:
+    """Escape clears; keep Enter as submit (Claude-like single-line default)."""
+    kb = KeyBindings()
+
+    @kb.add(Keys.Escape)
+    def _(event) -> None:  # type: ignore[no-untyped-def]
+        event.app.current_buffer.reset()
+
+    return kb
+
+
+def run_session(
+    config: AppConfig,
+    *,
+    api_key: str,
+    auth_label: str = "signed in",
+) -> int:
+    """Main interactive experience. Returns process exit code."""
+    ui = SessionUI(syntax_theme=config.ui.syntax_theme)
+    loop = create_session_loop(config, ui, api_key)
+
+    history_path = DEFAULT_CONFIG_DIR / "history"
+    DEFAULT_CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+
+    # Right-side hint (model) — OpenCode-ish chrome without noise
+    def rprompt() -> HTML:
+        m = config.provider.model
+        if len(m) > 18:
+            m = m[:16] + "…"
+        return HTML(f'<rprompt>{m}</rprompt>')
+
+    session: PromptSession[str] = PromptSession(
+        history=FileHistory(str(history_path)),
+        style=PROMPT_STYLE,
+        enable_history_search=True,
+        key_bindings=_build_key_bindings(),
+        rprompt=rprompt,
+        multiline=False,
+    )
+
+    ui.splash(
+        model=config.provider.model,
+        base_url=config.provider.base_url,
+        workspace=str(config.workspace),
+        auth=auth_label,
+        full=True,
+    )
+    log.info("session started (claude/opencode-style)")
+
+    try:
+        while True:
+            try:
+                line = session.prompt(
+                    HTML(f"<prompt>{art.ICON_USER}</prompt> "),
+                )
+            except KeyboardInterrupt:
+                # Claude-like: Ctrl+C clears the line, doesn't kill the session
+                ui.console.print()
+                continue
+            except EOFError:
+                ui.console.print()
+                ui.console.print(art.goodbye_art())
+                return 0
+
+            line = line.strip()
+            if not line:
+                continue
+
+            if line.startswith("/"):
+                try:
+                    _handle_slash(line, loop, ui, config)
+                except SystemExit as e:
+                    return int(e.code or 0)
+                continue
+
+            ui.user_turn_spacer()
+            ui.think_start("Thinking")
+            try:
+                result = loop.run(line)
+                ui.think_stop()
+                # Stream path skips on_assistant_text — close the stream + footer
+                if ui._streaming:
+                    ui.assistant_final(result.final_text or "")
+                elif result.stopped_reason == "circuit_breaker":
+                    # may already have been shown via on_assistant_text
+                    if ui._turn_t0 is not None:
+                        ui._print_turn_footer()
+                elif result.stopped_reason == "completed" and ui._turn_t0 is not None:
+                    # no final text callback fired
+                    ui._print_turn_footer()
+                ui.turn_break()
+            except ProviderError as exc:
+                ui.think_stop()
+                ui.error(str(exc))
+                log.error("provider error: %s", exc)
+            except KeyboardInterrupt:
+                ui.think_stop()
+                ui.warn("interrupted")
+            except Exception as exc:  # noqa: BLE001
+                ui.think_stop()
+                ui.error(f"{type(exc).__name__}: {exc}")
+                log.exception("session error")
+    finally:
+        loop.client.close()
+        log.info("session closed")

@@ -1,0 +1,35 @@
+# Copy to ~/.opencode_harness/config.yaml  (or run: honey --init)
+#
+# OpenAI-compatible providers:
+#   Pollinations: https://gen.pollinations.ai/v1
+#   Ollama:       http://localhost:11434/v1
+#   LM Studio:    http://localhost:1234/v1
+#   vLLM:         http://localhost:8000/v1
+
+provider:
+  base_url: "https://gen.pollinations.ai/v1"
+  # Prefer env POLLINATIONS_API_KEY — leave empty here in committed configs
+  api_key: ""
+  model: "kimi"
+  models:
+    - kimi
+    - deepseek
+    - hermes
+    - openai
+  timeout: 120
+  temperature: 0.2
+  stream_final: true
+
+tools:
+  bash_timeout: 45
+  max_tool_rounds: 12
+  enforce_workspace_boundary: true
+  extra_destructive_patterns: []
+
+ui:
+  show_tool_args: true
+  syntax_theme: monokai
+  spinner_style: dots
+
+# workspace: "/absolute/path/to/project"
+system_prompt_extra: ""

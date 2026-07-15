@@ -1,0 +1,36 @@
+# Python
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.eggs/
+dist/
+build/
+*.egg
+
+# Test / type / lint
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+.tox/
+.nox/
+
+# OS / editor
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*~
+
+# Logs & local secrets (never commit credentials)
+*.log
+.env
+.env.*
+!.env.example
+
+# Local honey/opencode harness state (user machine)
+# (repo never stores ~/.opencode_harness — listed for clarity)
