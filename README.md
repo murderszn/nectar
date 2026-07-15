@@ -1,69 +1,96 @@
-# Nectar · honey
+# 🍯 Nectar / Honey
 
-**Open coding agent for the terminal** — Claude/OpenCode-style session UX, full local toolbelt, and **Pollinations Pollen (BYOP)** as login/payment.
+> **Open coding agent for the terminal** — Claude/OpenCode-style session UX, full local toolbelt, and **Pollinations Pollen (BYOP)** as login/payment.
 
-Package name: `opencode-harness` · primary command: **`honey`**
+```bash
+pip install opencode-harness
+honey --init
+honey login    # browser device code → enter.pollinations.ai
+honey          # start interactive session
+```
 
-Designed for **OpenAI-compatible** endpoints out of the box:
+[![Python](https://img.shields.io/badge/python-3.10%2B-blue)](https://python.org)
+[![License](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 
-| Provider | Base URL | Notes |
-|----------|----------|--------|
-| **Pollinations** (default) | `https://gen.pollinations.ai/v1` | Set `POLLINATIONS_API_KEY` |
-| **Ollama** | `http://localhost:11434/v1` | e.g. model `hermes`, `llama3.1` |
-| LM Studio / vLLM / LiteLLM | their `/v1` URL | Same wire protocol |
+---
 
-Default routing model: **`kimi`** (or switch to **`deepseek`** / local **`hermes`**) for strong tool-calling behavior.
+## What is it?
+
+**Honey** (`opencode-harness`) is a model-agnostic coding agent that runs in your terminal. It brings the **Claude Code / OpenCode** experience locally — with a scrollback chat interface, inline tool execution, and visual ASCII art chrome — while staying provider-agnostic via OpenAI-compatible APIs.
+
+- **Interactive scrollback session** — no alt-screen takeover, terminal history stays usable
+- **9 built-in tools** — read, edit, write, search, glob, bash, browse web
+- **Circuit breaker** — hard limit on tool rounds so the agent can't recurse forever
+- **5 visual themes** — rainbow, prism, pulse, honey, quiet
+- **Pollinations BYOP auth** — device-code login, or bring your own API key
+- **Local-first** — works with Ollama, LM Studio, vLLM out of the box
 
 ---
 
 ## Quick start
 
 ```bash
-# 1. Clone / enter this directory
-cd /path/to/nectar
+# 1. Install
+pip install opencode-harness
 
-# 2. Create a virtualenv (recommended)
-python3 -m venv .venv
-source .venv/bin/activate
-
-# 3. Install
-pip install -e .
-
-# 4. Config + Pollen login (same BYOP flow as Sprout)
+# 2. Initialize config
 honey --init
-honey login                      # browser device code → enter.pollinations.ai
 
-# 5. Interactive session (Claude / OpenCode-style scrollback + ASCII art)
+# 3. Log in (Pollinations BYOP — uses your balance)
+honey login
+
+# 4. Start an interactive session
 honey
 
-# Or one-shot:
-honey "List Python files in the workspace and summarize the project"
+# 5. Or run one-shot
+honey "Find all TODOs in this repo and summarize them"
 ```
 
-**Primary command:** `honey`  
-**Aliases:** `opencode-harness`, `och`, `python -m opencode_harness`
+---
 
-### Auth (Pollinations BYOP)
+## Providers
 
-Matches [Sprout](https://github.com/murderszn/sprout) / [Bring Your Own Pollen](https://github.com/pollinations/pollinations/blob/main/BRING_YOUR_OWN_POLLEN.md):
+Any OpenAI-compatible endpoint works out of the box:
+
+| Provider | Base URL | Model example |
+|----------|----------|---------------|
+| **Pollinations** (default) | `https://gen.pollinations.ai/v1` | `kimi`, `deepseek` |
+| **Ollama** (local) | `http://localhost:11434/v1` | `hermes`, `llama3.1` |
+| **LM Studio** | `http://localhost:1234/v1` | any loaded model |
+| **vLLM / LiteLLM** | their `/v1` URL | any |
+
+Switch provider via CLI flag or config:
+
+```bash
+honey --base-url http://localhost:11434/v1 --model hermes
+```
+
+Or edit `~/.opencode_harness/config.yaml`:
+
+```yaml
+provider:
+  base_url: "http://localhost:11434/v1"
+  api_key: "ollama"
+  model: "hermes"
+```
+
+---
+
+## Auth
 
 | Command | Action |
 |---------|--------|
-| `honey login` | Device flow → browser → save `sk_` to `~/.opencode_harness/credentials.json` (mode 600) |
+| `honey login` | Device flow → browser → save key to `~/.opencode_harness/credentials.json` |
 | `honey logout` | Clear stored credentials |
 | `honey status` | Show endpoint, model, masked key source |
 
-**Resolution order:** env (`POLLINATIONS_API_KEY` …) → `credentials.json` → `provider.api_key` in config → interactive first-run prompt (BYOP recommended).
+**Key resolution order:** `POLLINATIONS_API_KEY` env → `credentials.json` → `provider.api_key` in config → interactive prompt.
 
-First launch without a key asks:
+---
 
-> Sign in with Pollen at enter.pollinations.ai? (uses your balance — recommended)
+## Interactive session
 
-### Interactive session (default)
-
-Running `honey` opens a **scrollback chat** like Claude Code / OpenCode — type a goal, watch tools run inline, read the answer. No alt-screen takeover; terminal history stays usable.
-
-Visual identity is custom **fluid ASCII art** (gradient NECTAR wordmark, nectar drop mark, wave separators).
+Running `honey` opens a scrollback chat. Type a goal, watch tools run inline, read the answer.
 
 ```
   ❯ your goal here
@@ -77,21 +104,59 @@ Visual identity is custom **fluid ASCII art** (gradient NECTAR wordmark, nectar 
 | Input | Action |
 |-------|--------|
 | goal text | Run the agent loop |
-| `/help` `/model` `/logs` `/reset` `/exit` | Session commands |
-| `Ctrl+C` | Clear the current line |
+| `/help` | Show commands |
+| `/model <name>` | Switch model |
+| `/reset` | Clear conversation history |
+| `/tools` | List available tools |
+| `/config` | Show effective settings |
+| `/mode plan` | Read-only mode (no write/edit/bash) |
+| `/mode build` | Full tools mode (default) |
+| `Ctrl+C` | Clear current line |
 | `Ctrl+D` or `/exit` | Quit |
 
 Optional full-screen mode: `honey --tui`
 
-### Activity logging (know when tools are working)
+---
+
+## Built-in tools
+
+| Tool | Purpose |
+|------|---------|
+| `read_file` | Open files with line numbers + pagination (`offset`/`limit`) |
+| `edit_file` | Surgical old→new string replace (unique match) |
+| `write_file` | Create or overwrite files |
+| `glob_files` | Find paths by glob (`**/*.py`) |
+| `grep_search` | Content search (ripgrep when available) |
+| `list_directory` | List a folder |
+| `execute_bash_command` | Shell with 45s timeout; destructive commands need `[y/N]` confirmation |
+| `browse_web_content` | Fetch docs as cleaned text |
+
+**Modes:**
+- `build` (default) — full tool access
+- `plan` — read/search only (no write/edit/bash)
+
+---
+
+## Themes
+
+Set in `~/.opencode_harness/config.yaml` or via `/theme <name>` in session:
+
+| Theme | Style |
+|-------|-------|
+| `rainbow` | Vivid rainbow bars + braille spinner (default) |
+| `prism` | Spinning color circles + prism accents |
+| `pulse` | Soft pastel pulse dots |
+| `honey` | Warm nectar gradient |
+| `quiet` | Minimal dim chrome |
+
+---
+
+## Activity logging
 
 Every run writes a rotating log so you can see model calls, tool starts/ends, shell exit codes, and timings:
 
 ```bash
-# Path (shown on splash + `status`)
-~/.opencode_harness/logs/harness.log
-
-# Live tail in another terminal while the session runs
+# Live tail while session runs
 tail -f ~/.opencode_harness/logs/harness.log
 
 # Dump recent lines
@@ -101,78 +166,27 @@ honey logs
 honey -v
 ```
 
-**What gets logged**
-
-| Event | Example |
-|-------|---------|
-| User goal | `▶ user goal: …` |
-| Model request/response | `⟳ model request` / `✓ model response … 1.2s` |
-| Provider HTTP | `POST …/chat/completions` / `provider OK` |
-| Tool start/end | `⚙ tool start execute_bash_command` / `↳ tool end … outcome=ok` |
-| Shell | `shell exec` / `shell done exit=0 0.05s` |
-| Safety gate | `destructive command BLOCKED/APPROVED` |
-
-In session, tools print inline with spinners; `/logs` shows recent file log lines.
-
-### Local Ollama example
-
-```yaml
-# ~/.opencode_harness/config.yaml
-provider:
-  base_url: "http://localhost:11434/v1"
-  api_key: "ollama"   # often ignored; any non-empty string is fine
-  model: "hermes"
-```
-
-```bash
-honey --base-url http://localhost:11434/v1 --model hermes
-```
-
 ---
 
 ## Architecture
 
 ```
-┌─────────────────────────────────────────────────────────────┐
-│  CLI (prompt_toolkit history + Rich panels/spinners)        │
-└───────────────────────────┬─────────────────────────────────┘
-                            │ user goal
-┌───────────────────────────▼─────────────────────────────────┐
-│  AgentLoop                                                  │
-│   • system prompt + tool JSON schemas                       │
-│   • circuit breaker (max 12 tool rounds / prompt)           │
-│   • append role=tool messages → re-query model              │
-└───────────────┬─────────────────────────┬───────────────────┘
-                │ OpenAI chat.completions │ dispatch()
-┌───────────────▼───────────┐   ┌─────────▼───────────────────┐
-│  OpenAICompatibleClient   │   │  ToolRegistry               │
-│  (httpx, any /v1 host)    │   │  • execute_bash_command     │
-└───────────────────────────┘   │  • view_workspace_file      │
-                                │  • write_workspace_file     │
-                                │  • browse_web_content       │
-                                └─────────────────────────────┘
-```
-
-### Package layout
-
-```
-opencode_harness/
-  cli.py                 # Entry point, slash commands, REPL
-  config.py              # YAML/JSON + env loading
-  models.py              # Message / ToolCall / ToolSpec types
-  provider/
-    client.py            # OpenAI-compatible HTTP client
-  tools/
-    registry.py          # Rigid ToolRegistry + extension API
-    bash.py              # subprocess + timeout
-    safety.py            # Destructive-command patterns
-    files.py             # Workspace-bound file I/O
-    web.py               # httpx + BeautifulSoup text extract
-  agent/
-    loop.py              # Multi-turn tool evaluation loop
-    prompts.py           # System prompt builder
-  ui/
-    console.py           # Rich panels, spinners, confirmations
+┌─────────────────────────────────────────────┐
+│  CLI (prompt_toolkit + Rich panels/spinners) │
+└───────────────────────┬─────────────────────┘
+                        │ user goal
+┌───────────────────────▼─────────────────────┐
+│  AgentLoop                                    │
+│   • system prompt + tool JSON schemas        │
+│   • circuit breaker (max 12 tool rounds)     │
+│   • append role=tool messages → re-query     │
+└───────────────┬─────────────────┬─────────────┘
+                │                 │
+┌───────────────▼─────────┐ ┌─────▼─────────────┐
+│  OpenAICompatibleClient │ │  ToolRegistry      │
+│  (httpx, any /v1 host)  │ │  • bash, files,   │
+└─────────────────────────┘ │    web, search    │
+                            └───────────────────┘
 ```
 
 ---
@@ -181,22 +195,31 @@ opencode_harness/
 
 **Path:** `~/.opencode_harness/config.yaml` (or `.json`)
 
-| Key | Default | Description |
-|-----|---------|-------------|
-| `provider.base_url` | `https://gen.pollinations.ai/v1` | OpenAI-compatible API root |
-| `provider.model` | `kimi` | Active model id |
-| `provider.api_key` | `""` | Prefer env vars instead |
-| `tools.bash_timeout` | `45` | Seconds before kill |
-| `tools.max_tool_rounds` | `12` | Circuit breaker |
-| `tools.enforce_workspace_boundary` | `true` | Block writes outside CWD/workspace |
-| `workspace` | process CWD | Root for bash + files |
+```yaml
+provider:
+  base_url: "https://gen.pollinations.ai/v1"
+  model: "kimi"
+  api_key: ""              # prefer env vars
 
-### Environment variables
+tools:
+  bash_timeout: 45
+  max_tool_rounds: 12
+  enforce_workspace_boundary: true
+
+ui:
+  theme: rainbow
+  syntax_theme: monokai
+  show_tool_args: true
+
+# workspace: "/absolute/path/to/project"
+```
+
+**Environment variables:**
 
 | Variable | Purpose |
 |----------|---------|
 | `POLLINATIONS_API_KEY` | API key (preferred for Pollinations) |
-| `OPENAI_API_KEY` | Fallback key name |
+| `OPENAI_API_KEY` | Fallback key |
 | `OPENCODE_HARNESS_API_KEY` | Explicit harness key |
 | `OPENCODE_HARNESS_BASE_URL` | Override base URL |
 | `OPENCODE_HARNESS_MODEL` | Override model |
@@ -205,104 +228,17 @@ opencode_harness/
 
 ---
 
-## Built-in tools (OpenCode / Hermes-style)
-
-Coding-agent toolbelt (not chat-only). Design reviewed against MIT-licensed
-[OpenCode](https://github.com/anomalyco/opencode) and
-[Hermes Agent](https://github.com/NousResearch/hermes-agent) — see `THIRD_PARTY.md`.
-
-| Tool | Purpose |
-|------|---------|
-| `read_file` | Open files with line numbers + `offset`/`limit` pagination |
-| `edit_file` | Surgical old→new string replace (unique match) |
-| `write_file` | Create / full rewrite |
-| `glob_files` | Find paths by glob (`**/*.py`) |
-| `grep_search` | Content search (ripgrep when available) |
-| `list_directory` | List a folder |
-| `execute_bash_command` | Shell (45s timeout; destructive cmds need `[y/N]`) |
-| `browse_web_content` | Fetch docs as cleaned text |
-
-**Modes** (OpenCode-like):
-
-- `build` (default) — full tools  
-- `plan` — read/search only (no write/edit/bash)  
-
-```bash
-# in session
-/mode plan
-/mode build
-```
-
-Config: `agent_mode: build` in `config.yaml`.
-
-Legacy aliases still work: `view_workspace_file`, `write_workspace_file`.
-
-### Extending tools
-
-```python
-from opencode_harness.models import ToolSpec, ToolParameter
-
-registry.register(ToolSpec(
-    name="my_custom_tool",
-    description="Does something useful",
-    parameters=[ToolParameter("query", "string", "Search query")],
-    handler=lambda query: f"result for {query}",
-))
-```
-
----
-
-## Agent loop & circuit breaker
-
-1. User submits a high-level goal.
-2. Harness sends messages + tool schemas to the provider (`stream=False` for tool turns).
-3. On `tool_calls`: log intent → run local tool → append `{role: "tool", tool_call_id, content}` → loop.
-4. On final text: render to the user and stop.
-5. **Hard stop** after **12** sequential tool executions per prompt (configurable) so the agent cannot recurse forever.
-
----
-
-## REPL slash commands
-
-| Command | Action |
-|---------|--------|
-| `/help` | Show help |
-| `/model [name]` | Show or switch model |
-| `/models` | List configured models |
-| `/tools` | List tool registry |
-| `/reset` | Clear conversation history |
-| `/config` | Show effective settings |
-| `/workspace [path]` | Show/change workspace |
-| `/exit` | Quit |
-
-Input history is stored at `~/.opencode_harness/history` via **prompt_toolkit**.
-
----
-
-## CLI flags
-
-```
-honey --init
-honey --config ./my.yaml
-honey --model deepseek
-honey --base-url http://localhost:11434/v1
-honey --workspace /path/to/project
-honey "one-shot goal text"
-```
-
----
-
 ## Development
 
 ```bash
+git clone https://github.com/murderszn/nectar.git
+cd nectar
 pip install -e ".[dev]"
 pytest -q
-honey --help
-python -m opencode_harness --help
 ```
 
 ---
 
 ## License
 
-MIT — use freely as a standalone developer-agent framework.
+MIT — see [LICENSE](LICENSE)

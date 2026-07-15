@@ -23,8 +23,6 @@ from prompt_toolkit.keys import Keys
 from prompt_toolkit.styles import Style as PTStyle
 from rich.console import Console
 from rich.live import Live
-from rich.markdown import Markdown
-from rich.padding import Padding
 from rich.syntax import Syntax
 from rich.text import Text
 
@@ -44,6 +42,7 @@ from opencode_harness.ui.art import (
     C_MINT,
     C_SOFT,
 )
+from opencode_harness.ui.format_output import print_assistant_output
 from opencode_harness.ui.theme import (
     RainbowWait,
     complete_flash,
@@ -79,6 +78,7 @@ class SessionUI:
         self._turn_t0: Optional[float] = None
         self._tools_this_turn = 0
         self._streaming = False
+        self._stream_buf = ""
 
     def set_theme(self, name: str) -> None:
         self.theme = get_theme(name)
@@ -232,24 +232,50 @@ class SessionUI:
             self.console.print(Text(f"     {line}", style=style))
 
     def assistant_final(self, text: str) -> None:
+        """
+        Render the full assistant message with structure-aware formatting.
+
+        Streaming path buffers tokens so grids/ASCII are not reflowed mid-flight;
+        we format once at the end for correct monospace alignment.
+        """
         self.think_stop()
-        if self._streaming:
-            # stream path already printed tokens
-            self.console.print()
-            self._streaming = False
-        else:
-            self.console.print(art.agent_header())
-            md = Markdown(text or "")
-            self.console.print(Padding(md, (0, 0, 0, 2)))
+        body = text or ""
+        if self._streaming and self._stream_buf.strip():
+            # Prefer full buffer (includes stream) when available
+            body = self._stream_buf
+        self._streaming = False
+        self._stream_buf = ""
+
+        self.console.print(art.agent_header())
+        if body.strip():
+            print_assistant_output(
+                self.console,
+                body,
+                syntax_theme=self.syntax_theme,
+                indent=2,
+            )
+        self.console.print()
         self._print_turn_footer()
 
     def stream_delta(self, chunk: str) -> None:
+        """
+        Buffer stream tokens; show a light rainbow wait instead of raw wrap.
+
+        Printing char-by-char with soft_wrap destroys ASCII/grid alignment.
+        We format the complete message in assistant_final / turn end.
+        """
         self.think_stop()
         if not self._streaming:
             self._streaming = True
-            self.console.print(art.agent_header(), end="")
-            self.console.print("  ", end="")
-        self.console.print(chunk, end="", highlight=False, soft_wrap=True)
+            self._stream_buf = ""
+            self.think_start("Writing")
+        self._stream_buf += chunk
+        # Keep the wait label alive / refresh elapsed
+        if self._wait is not None:
+            n = len(self._stream_buf)
+            self._wait.set_label(f"Writing · {n} chars")
+            if self._live is not None:
+                self._live.update(self._wait)
 
     def _print_turn_footer(self) -> None:
         if self._turn_t0 is None:
@@ -667,16 +693,16 @@ def run_session(
             try:
                 result = loop.run(line)
                 ui.think_stop()
-                # Stream path skips on_assistant_text — close the stream + footer
-                if ui._streaming:
-                    ui.assistant_final(result.final_text or "")
+                # Stream path skips on_assistant_text — format buffered output now
+                if ui._streaming or ui._stream_buf:
+                    ui.assistant_final(result.final_text or ui._stream_buf)
                 elif result.stopped_reason == "circuit_breaker":
-                    # may already have been shown via on_assistant_text
                     if ui._turn_t0 is not None:
                         ui._print_turn_footer()
                 elif result.stopped_reason == "completed" and ui._turn_t0 is not None:
-                    # no final text callback fired
-                    ui._print_turn_footer()
+                    # Final already rendered via on_assistant_text → footer done
+                    # Only emit footer if assistant_final never ran
+                    pass
                 ui.turn_break()
             except ProviderError as exc:
                 ui.think_stop()
