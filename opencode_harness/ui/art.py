@@ -101,15 +101,17 @@ def _shade_block(lines: list[str], colors: list[str]) -> Text:
 
 
 def fluid_wave(width: int = 56, variant: int | None = None) -> Text:
-    """Organic separator strip."""
+    """Organic separator strip — rainbow by default."""
+    from opencode_harness.ui.theme import RAINBOW, RAINBOW_SOFT
+
     v = variant if variant is not None else random.randint(0, 3)
     raw = [_WAVE_A, _WAVE_B, _WAVE_C, _WAVE_D][v % 4]
     s = (raw * ((width // len(raw)) + 2))[:width]
     palette = {
-        0: [C_TEAL, C_CYAN, C_VIOLET, C_HONEY],
-        1: [C_HONEY, C_AMBER, C_CORAL, C_VIOLET],
-        2: [C_MINT, C_TEAL, C_CYAN, C_FOG],
-        3: [C_VIOLET, C_CYAN, C_TEAL, C_HONEY],
+        0: list(RAINBOW),
+        1: list(RAINBOW_SOFT),
+        2: list(RAINBOW[::-1]),
+        3: [C_HONEY, C_AMBER, C_CORAL, C_VIOLET, C_CYAN, C_TEAL, C_MINT],
     }[v % 4]
     return _gradient_line(s, palette)
 
@@ -142,16 +144,20 @@ def render_splash(
         wave1 = Text("")
         wave2 = Text("")
     else:
+        from opencode_harness.ui.theme import RAINBOW, rainbow_text
+
         mark = _shade_block(
             MARK.splitlines(),
-            [C_VIOLET, C_CYAN, C_TEAL, C_HONEY, C_AMBER, C_HONEY, C_TEAL],
+            list(RAINBOW),
         )
         word = _shade_block(
             WORDMARK.splitlines(),
-            [C_CYAN, C_TEAL, C_MINT, C_HONEY, C_AMBER, C_CORAL],
+            list(RAINBOW),
         )
-        tag = Text(f"  {TAG}  ·  honey v{version}", style=f"bold {C_FOG}")
-        wave1 = Group(Text(""), fluid_wave(62, variant=0), Text(""))
+        tag = Text("  ")
+        tag.append_text(rainbow_text(f"{TAG}  ·  honey v{version}", RAINBOW))
+        # Double rainbow strip under the wordmark
+        wave1 = Group(Text(""), fluid_wave(62, variant=0), Text("  "), fluid_wave(62, variant=2), Text(""))
         wave2 = Group(Text(""), fluid_wave(62, variant=1), Text(""))
         top = Group(Text(""), mark, Text(""), word, tag)
 
@@ -219,20 +225,24 @@ def tool_result_prefix(*, ok: bool, summary: str) -> Text:
 
 
 def agent_header() -> Text:
-    """Nectar agent label above assistant replies."""
+    """Nectar agent label above assistant replies — rainbow accent."""
+    from opencode_harness.ui.theme import RAINBOW, rainbow_text
+
     t = Text()
-    t.append(f"  {ICON_AGENT} ", style=f"bold {C_TEAL}")
-    t.append("nectar", style=f"bold {C_TEAL}")
+    t.append(f"  {ICON_AGENT} ", style=f"bold {RAINBOW[5]}")
+    t.append_text(rainbow_text("nectar", RAINBOW))
     t.append(" agent", style=C_DIM)
     t.append("\n")
     return t
 
 
 def goodbye_art() -> Text:
+    from opencode_harness.ui.theme import RAINBOW, rainbow_text
+
     t = Text()
-    t.append_text(fluid_wave(36, variant=2))
+    t.append_text(fluid_wave(36, variant=0))
     t.append("\n  ", style="")
-    t.append("nectar session closed. ", style=C_DIM)
+    t.append_text(rainbow_text("nectar session closed. ", RAINBOW))
     t.append("stay sticky.\n", style=C_HONEY)
     return t
 

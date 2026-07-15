@@ -21,11 +21,10 @@ from prompt_toolkit.history import FileHistory
 from prompt_toolkit.key_binding import KeyBindings
 from prompt_toolkit.keys import Keys
 from prompt_toolkit.styles import Style as PTStyle
-from rich.console import Console, Group
+from rich.console import Console
 from rich.live import Live
 from rich.markdown import Markdown
 from rich.padding import Padding
-from rich.spinner import Spinner
 from rich.syntax import Syntax
 from rich.text import Text
 
@@ -39,25 +38,21 @@ from opencode_harness.tools.registry import ToolRegistry
 from opencode_harness.ui import art
 from opencode_harness.ui.art import (
     C_CORAL,
-    C_CYAN,
     C_DIM,
     C_FOG,
     C_HONEY,
-    C_INK,
     C_MINT,
     C_SOFT,
-    C_TEAL,
+)
+from opencode_harness.ui.theme import (
+    RainbowWait,
+    complete_flash,
+    get_theme,
+    list_themes,
+    rainbow_text,
 )
 
 log = get_logger("session")
-
-# prompt_toolkit styles — soft honey prompt like Claude's ❯
-PROMPT_STYLE = PTStyle.from_dict(
-    {
-        "prompt": f"bold {C_HONEY}",
-        "rprompt": f"{C_DIM}",
-    }
-)
 
 # How many result lines to show before collapsing (Claude-like density)
 _RESULT_PREVIEW_LINES = 12
@@ -65,17 +60,36 @@ _RESULT_MAX_CHARS = 2400
 
 
 class SessionUI:
-    """Claude/OpenCode-quiet conversation surface."""
+    """Claude/OpenCode conversation surface with rainbow wait chrome."""
 
-    def __init__(self, console: Optional[Console] = None, *, syntax_theme: str = "monokai"):
+    def __init__(
+        self,
+        console: Optional[Console] = None,
+        *,
+        syntax_theme: str = "monokai",
+        theme_name: str = "rainbow",
+    ):
         self.console = console or Console(highlight=False)
         self.syntax_theme = syntax_theme
+        self.theme = get_theme(theme_name)
         self._live: Optional[Live] = None
+        self._wait: Optional[RainbowWait] = None
         self._status = "idle"
         self._t0: Optional[float] = None
         self._turn_t0: Optional[float] = None
         self._tools_this_turn = 0
         self._streaming = False
+
+    def set_theme(self, name: str) -> None:
+        self.theme = get_theme(name)
+
+    def prompt_style(self) -> PTStyle:
+        return PTStyle.from_dict(
+            {
+                "prompt": f"bold {self.theme.prompt_color}",
+                "rprompt": f"{self.theme.dim_color}",
+            }
+        )
 
     # ------------------------------------------------------------------
     # Chrome
@@ -100,9 +114,14 @@ class SessionUI:
             log_file=str(log_path()),
             full=full,
         )
+        # Theme badge under splash
+        badge = Text("  theme ")
+        badge.append_text(rainbow_text(self.theme.name, self.theme.palette))
+        badge.append(f"  ·  /theme to switch", style=self.theme.dim_color)
+        self.console.print(badge)
+        self.console.print()
 
     def turn_break(self) -> None:
-        # Quiet breath — no wave spam
         self.console.print()
 
     def info(self, msg: str) -> None:
@@ -112,13 +131,13 @@ class SessionUI:
         self.console.print(Text(f"  ⚠ {msg}", style=C_HONEY))
 
     def error(self, msg: str) -> None:
-        self.console.print(Text(f"  {art.ICON_FAIL} {msg}", style=C_CORAL))
+        self.console.print(Text(f"  {art.ICON_FAIL} {msg}", style=self.theme.err_color))
 
     def system(self, msg: str) -> None:
-        self.console.print(Text(f"  {msg}", style=C_DIM))
+        self.console.print(Text(f"  {msg}", style=self.theme.dim_color))
 
     # ------------------------------------------------------------------
-    # Thinking / spinner (transient — vanishes when work finishes)
+    # Rainbow wait / loading (transient)
     # ------------------------------------------------------------------
 
     def think_start(self, message: str = "Thinking") -> None:
@@ -126,37 +145,23 @@ class SessionUI:
         self._status = message
         self._t0 = time.monotonic()
         label = _humanize_status(message)
-        spin = Spinner(
-            "dots",
-            text=Text(f" {label}", style=f"italic {C_DIM}"),
-            style=C_CYAN,
-        )
+        self._wait = RainbowWait(label, theme=self.theme, t0=self._t0)
         self._live = Live(
-            spin,
+            self._wait,
             console=self.console,
-            refresh_per_second=16,
-            transient=True,  # critical: leave no ghost line
+            refresh_per_second=18,
+            transient=True,
             vertical_overflow="ellipsis",
         )
         self._live.start()
 
     def think_update(self, message: str) -> None:
         self._status = message
-        if self._live is None:
+        if self._live is None or self._wait is None:
             self.think_start(message)
             return
-        label = _humanize_status(message)
-        elapsed = ""
-        if self._t0 is not None:
-            secs = int(time.monotonic() - self._t0)
-            if secs >= 1:
-                elapsed = f" · {secs}s"
-        spin = Spinner(
-            "dots",
-            text=Text(f" {label}{elapsed}", style=f"italic {C_DIM}"),
-            style=C_CYAN,
-        )
-        self._live.update(spin)
+        self._wait.set_label(_humanize_status(message))
+        self._live.update(self._wait)
 
     def think_stop(self) -> None:
         if self._live is not None:
@@ -165,6 +170,7 @@ class SessionUI:
             except Exception:  # pragma: no cover
                 pass
             self._live = None
+        self._wait = None
         self._t0 = None
 
     # ------------------------------------------------------------------
@@ -186,7 +192,17 @@ class SessionUI:
         pretty = art._pretty_tool_name(name)
         detail = _tool_detail(name, args)
 
-        self.console.print(art.tool_call_line(pretty, detail))
+        # Rainbow tool bullet
+        line = Text("  ")
+        line.append(art.ICON_TOOL, style=self.theme.palette[self._tools_this_turn % len(self.theme.palette)])
+        line.append(" ", style="")
+        line.append(pretty, style=f"bold {self.theme.ink_color}")
+        if detail:
+            short = detail if len(detail) <= 72 else detail[:69] + "…"
+            line.append("(", style=C_SOFT)
+            line.append(short, style=C_FOG)
+            line.append(")", style=C_SOFT)
+        self.console.print(line)
 
         # Optional compact extras (edit diffs, write path only — not full body)
         if name == "edit_file":
@@ -243,7 +259,9 @@ class SessionUI:
         if self._tools_this_turn:
             parts.append(f"{self._tools_this_turn} tool" + ("s" if self._tools_this_turn != 1 else ""))
         parts.append(f"{elapsed:.1f}s")
-        self.console.print(Text(f"  {art.ICON_DOT} " + " · ".join(parts), style=C_SOFT))
+        # Mini rainbow flash + stats
+        self.console.print(complete_flash(self.theme, width=16), end="")
+        self.console.print(Text("  " + " · ".join(parts), style=self.theme.dim_color))
         self._turn_t0 = None
 
     def confirm_destructive(self, command: str, reason: str) -> bool:
@@ -406,6 +424,7 @@ def _handle_slash(
         for row in (
             "/model [name]   pick model (sectioned list if no name)",
             "/models         same as /model",
+            "/theme [name]   rainbow · prism · pulse · honey · quiet",
             "/tools          list tools",
             "/mode build|plan",
             "/reset          clear conversation",
@@ -416,6 +435,27 @@ def _handle_slash(
             "/exit",
         ):
             ui.system(f"  {row}")
+        return True
+
+    if cmd in {"/theme", "/themes"}:
+        if not arg:
+            ui.system(f"current theme · {ui.theme.name}")
+            for th in list_themes():
+                mark = "→" if th.name == ui.theme.name else " "
+                ui.system(f"  {mark} {th.name:8}  {th.description}")
+            ui.system("  set with /theme rainbow")
+            return True
+        name = arg.strip().lower()
+        if name not in {t.name for t in list_themes()}:
+            ui.warn(f"unknown theme {name!r}  ·  try /theme")
+            return True
+        ui.set_theme(name)
+        config.ui.theme = name
+        ui.info(f"theme → {name}")
+        # Quick demo of the wait animation
+        ui.think_start("Theme preview")
+        time.sleep(0.9)
+        ui.think_stop()
         return True
 
     if cmd == "/banner":
@@ -564,7 +604,8 @@ def run_session(
     auth_label: str = "signed in",
 ) -> int:
     """Main interactive experience. Returns process exit code."""
-    ui = SessionUI(syntax_theme=config.ui.syntax_theme)
+    theme_name = getattr(config.ui, "theme", "rainbow") or "rainbow"
+    ui = SessionUI(syntax_theme=config.ui.syntax_theme, theme_name=theme_name)
     loop = create_session_loop(config, ui, api_key)
 
     history_path = DEFAULT_CONFIG_DIR / "history"
@@ -579,7 +620,7 @@ def run_session(
 
     session: PromptSession[str] = PromptSession(
         history=FileHistory(str(history_path)),
-        style=PROMPT_STYLE,
+        style=ui.prompt_style(),
         enable_history_search=True,
         key_bindings=_build_key_bindings(),
         rprompt=rprompt,

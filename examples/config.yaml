@@ -30,6 +30,8 @@ ui:
   show_tool_args: true
   syntax_theme: monokai
   spinner_style: dots
+  # rainbow | prism | pulse | honey | quiet
+  theme: rainbow
 
 # workspace: "/absolute/path/to/project"
 system_prompt_extra: ""

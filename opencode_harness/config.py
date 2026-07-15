@@ -65,6 +65,8 @@ class UIConfig:
     show_tool_args: bool = True
     syntax_theme: str = "monokai"
     spinner_style: str = "dots"
+    # Design theme: rainbow (default) | prism | pulse | honey | quiet
+    theme: str = "rainbow"
 
 
 @dataclass
@@ -162,6 +164,7 @@ def _from_dict(data: dict[str, Any]) -> AppConfig:
         show_tool_args=bool(ui.get("show_tool_args", True)),
         syntax_theme=str(ui.get("syntax_theme", "monokai")),
         spinner_style=str(ui.get("spinner_style", "dots")),
+        theme=str(ui.get("theme", "rainbow")),
     )
 
     workspace_raw = data.get("workspace") or str(DEFAULT_WORKSPACE)
@@ -265,6 +268,8 @@ ui:
   show_tool_args: true
   syntax_theme: monokai
   spinner_style: dots
+  # rainbow | prism | pulse | honey | quiet
+  theme: rainbow
 
 # Absolute path or leave unset to use the process CWD
 # workspace: "/path/to/project"
